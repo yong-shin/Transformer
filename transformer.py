@@ -270,9 +270,9 @@ class Transformer(nn.Module):
 
         super().__init__()
 
-        self.emb_enc = nn.Embedding(input_size, hidden_size)
-        self.emb_dec = nn.Embedding(output_size, hidden_size)
-        self.emb_dropout = nn.Dropout(dropout_p)
+        self.emb_enc = nn.Embedding(input_size, hidden_size) # 워드 임베딩 벡터 사이즈가 히든 사이즈로 고정. 임베딩 벡터 사이즈가 불필요하게 커질 수 있는 불필요함이 발생할 수 있음.
+        self.emb_dec = nn.Embedding(output_size, hidden_size) 
+        self.emb_dropout = nn.Dropout(dropout_p) # 임베딩 레이어 드랍아웃
 
         self.pos_enc = self._generate_pos_enc(hidden_size, max_length) # 한번 크게 만들어놓고, 필요한 만큼 잘라서 쓰면 된다.
 
@@ -295,7 +295,7 @@ class Transformer(nn.Module):
         self.generator = nn.Sequential(
             nn.LayerNorm(hidden_size), # Only for Pre-LN Transformer.
             nn.Linear(hidden_size, output_size),
-            nn.LogSoftmax(dim=-1),
+            nn.LogSoftmax(dim=-1), # 각 타임스탭별 단어별 로그 확률 값.
         )
 
     @torch.no_grad()
@@ -362,19 +362,19 @@ class Transformer(nn.Module):
 
             mask_enc = mask.unsqueeze(1).expand(*x.size(), mask.size(-1))
             mask_dec = mask.unsqueeze(1).expand(*y.size(), mask.size(-1))
-            # |mask_enc| = (batch_size, n, n)
-            # |mask_dec| = (batch_size, m, n)
+            # |mask_enc| = (batch_size, n, n) # 인코더에서 셀프 어텐션 할 때, 빈 자리에 마스킹 된 것.
+            # |mask_dec| = (batch_size, m, n) # 디코더에서 인코더 셀프 어텐션 할때, 인코더 빈 공간 마스킹 한 것.
 
         z = self.emb_dropout(self._position_encoding(self.emb_enc(x)))
-        z, _ = self.encoder(z, mask_enc)
-        # |z| = (batch_size, n, hidden_size)
+        z, _ = self.encoder(z, mask_enc) # 마스크는 필요 없으므로 안 받아도 된다.
+        # |z| = (batch_size, n, hidden_size) # 인코더의 최종 레이어의 아웃풋.
 
-        # Generate future mask
+        # Generate future mask # 미래를 보는 것을 방지하는 마스크.
         with torch.no_grad():
             future_mask = torch.triu(x.new_ones((y.size(1), y.size(1))), diagonal=1).bool()
             # |future_mask| = (m, m)
             future_mask = future_mask.unsqueeze(0).expand(y.size(0), *future_mask.size())
-            # |fwd_mask| = (batch_size, m, m)
+            # |future_mask| = (batch_size, m, m)
 
         h = self.emb_dropout(self._position_encoding(self.emb_dec(y)))
         h, _, _, _, _ = self.decoder(h, z, mask_dec, None, future_mask)
@@ -385,11 +385,11 @@ class Transformer(nn.Module):
 
         return y_hat
 
-    def search(self, x, is_greedy=True, max_length=255):
+    def search(self, x, is_greedy=True, max_length=255): # is_greedy: 매 타입스탭마다 가장 높은 확률값을 가진 단어를 뽑겠다. # 추론이니까 당연히 y는 안들어온다.
         # |x[0]| = (batch_size, n)
         batch_size = x[0].size(0)
 
-        mask = self._generate_mask(x[0], x[1])
+        mask = self._generate_mask(x[0], x[1]) # 인코더 타임스탭에 있는 마스크
         # |mask| = (batch_size, n)
         x = x[0]
 
@@ -400,43 +400,45 @@ class Transformer(nn.Module):
 
         z = self.emb_dropout(self._position_encoding(self.emb_enc(x)))
         z, _ = self.encoder(z, mask_enc)
-        # |z| = (batch_size, n, hidden_size)
+        # |z| = (batch_size, n, hidden_size) # 미니배치내 샘플별 인코더 타임스탭별 히든스테이트.
 
         # Fill a vector, which has 'batch_size' dimension, with BOS value.
         y_t_1 = x.new(batch_size, 1).zero_() + data_loader.BOS
         # |y_t_1| = (batch_size, 1)
-        is_decoding = x.new_ones(batch_size, 1).bool()
+        is_decoding = x.new_ones(batch_size, 1).bool() # 1이면 디코딩 중, 0이면 끝.
 
-        prevs = [None for _ in range(len(self.decoder._modules) + 1)]
+        prevs = [None for _ in range(len(self.decoder._modules) + 1)] # 이전 타임스탭의 결과물을 담는다.
         y_hats, indice = [], []
         # Repeat a loop while sum of 'is_decoding' flag is bigger than 0,
         # or current time-step is smaller than maximum length.
         while is_decoding.sum() > 0 and len(indice) < max_length:
             # Unlike training procedure,
             # take the last time-step's output during the inference.
-            h_t = self.emb_dropout(
+            h_t = self.emb_dropout( # 첫 번째 레이어에 대한 입력
                 self._position_encoding(self.emb_dec(y_t_1), init_pos=len(indice))
-            )
-            # |h_t| = (batch_size, 1, hidden_size))
+            ) 
+            # |h_t| = (batch_size, 1, hidden_size) # 미니배치내 각 샘플별, 한 타임스탭에 대한 히든 스테이트.
             if prevs[0] is None:
                 prevs[0] = h_t
             else:
-                prevs[0] = torch.cat([prevs[0], h_t], dim=1)
+                prevs[0] = torch.cat([prevs[0], h_t], dim=1) # 타임스탭 차원에 대해 concat.
 
-            for layer_index, block in enumerate(self.decoder._modules.values()):
+            for layer_index, block in enumerate(self.decoder._modules.values()): # 디코더 블럭들을 for문을 통해 하나 하나 돌린다.
                 prev = prevs[layer_index]
-                # |prev| = (batch_size, len(y_hats), hidden_size)
+                # |prev| = (batch_size, len(y_hats), hidden_size) # len(y_hats)은 현재 타임스탭. 얼마나 타임스탭이 지났는지 정보가 들어 있을 것.
 
-                h_t, _, _, _, _ = block(h_t, z, mask_dec, prev, None)
-                # |h_t| = (batch_size, 1, hidden_size)
+                h_t, _, _, _, _ = block(h_t, z, mask_dec, prev, None) # 맨 마지막 인자는 "future_mask". Inference 단계에서는 future를 볼 일이 없으므로 None.
+                # z가 인코더의 아웃풋. K, V가 여기에 해당 됨.
+                # mask_dec는 인코더에서 들어온 source sentence에 대해 비어있는 타임스탭에 대한 마스크.
+                # |h_t| = (batch_size, 1, hidden_size) # 이전 레이어로부터 온 결과 값.
 
                 if prevs[layer_index + 1] is None:
                     prevs[layer_index + 1] = h_t
                 else:
-                    prevs[layer_index + 1] = torch.cat([prevs[layer_index + 1], h_t], dim=1)
+                    prevs[layer_index + 1] = torch.cat([prevs[layer_index + 1], h_t], dim=1) # 원래 있던 것들에다가 현재 나온 것을 concat. 
                 # |prev| = (batch_size, len(y_hats) + 1, hidden_size)
 
-            y_hat_t = self.generator(h_t)
+            y_hat_t = self.generator(h_t) # 해당 타임스탭의 각 단어별 확률 분포. 정확히는 로그 확률 값.
             # |y_hat_t| = (batch_size, 1, output_size)
 
             y_hats += [y_hat_t]
@@ -446,12 +448,12 @@ class Transformer(nn.Module):
                 y_t_1 = torch.multinomial(y_hat_t.exp().view(x.size(0), -1), 1)
             # Put PAD if the sample is done.
             y_t_1 = y_t_1.masked_fill_(
-                ~is_decoding,
+                ~is_decoding, # is_decoding이 false인 경우, 즉 끝난 경우. EOS가 나와도 계속 뭔가를 생성하고 있기 때문에 패드를 씌어버린다.
                 data_loader.PAD,
             )
 
             # Update is_decoding flag.
-            is_decoding = is_decoding * torch.ne(y_t_1, data_loader.EOS)
+            is_decoding = is_decoding * torch.ne(y_t_1, data_loader.EOS) # EOS가 있는 경우 is_decoding을 0으로 만든다.
             # |y_t_1| = (batch_size, 1)
             # |is_decoding| = (batch_size, 1)
             indice += [y_t_1]
@@ -517,7 +519,7 @@ class Transformer(nn.Module):
         boards = [
             SingleBeamSearchBoard(
                 z.device,
-                prev_status_config,
+                prev_status_config, # 예전과 다르게 지금은 각 층별로 모든 타임스탭에 대해 다 가지고 있어야 함.
                 beam_size=beam_size,
                 max_length=max_length,
             ) for _ in range(batch_size)
@@ -583,7 +585,7 @@ class Transformer(nn.Module):
                     ) # Append new hidden state for each layer.
 
             y_hat_t = self.generator(h_t)
-            # |y_hat_t| = (batch_size, 1, output_size)
+            # |y_hat_t| = (batch_size, 1, output_size) # 미니배치내 각 샘플별 현재 타임스탭에 대한 로그 확률 분포.
 
             # |fab_prevs[i][begin:end]| = (beam_size, length, hidden_size)
             cnt = 0
